@@ -8,14 +8,25 @@ from PIL import Image
 
 
 def load_model_with_compatibility(model_path: str):
-    """Load a Keras model and patch legacy/newer InputLayer config key mismatch."""
-    try:
-        return tf.keras.models.load_model(model_path, compile=False)
-    except Exception as first_error:
-        # Some model files use `batch_shape` while this runtime expects `batch_input_shape`.
-        if "batch_shape" not in str(first_error):
-            raise
+    """Load model with compatibility fallbacks for common Keras serialization mismatches."""
+    custom_objects = {
+        # Newer saved configs may include this class name while older runtimes expect Policy.
+        "DTypePolicy": tf.keras.mixed_precision.Policy,
+    }
 
+    attempts = []
+
+    def _attempt_default():
+        return tf.keras.models.load_model(model_path, compile=False)
+
+    def _attempt_custom_objects():
+        return tf.keras.models.load_model(
+            model_path,
+            compile=False,
+            custom_objects=custom_objects,
+        )
+
+    def _attempt_inputlayer_patch(use_custom_objects: bool):
         original_init = tf.keras.layers.InputLayer.__init__
 
         def patched_init(self, *args, **kwargs):
@@ -25,32 +36,67 @@ def load_model_with_compatibility(model_path: str):
 
         tf.keras.layers.InputLayer.__init__ = patched_init
         try:
+            if use_custom_objects:
+                return tf.keras.models.load_model(
+                    model_path,
+                    compile=False,
+                    custom_objects=custom_objects,
+                )
             return tf.keras.models.load_model(model_path, compile=False)
         finally:
             tf.keras.layers.InputLayer.__init__ = original_init
+
+    loaders = [
+        _attempt_default,
+        _attempt_custom_objects,
+        lambda: _attempt_inputlayer_patch(use_custom_objects=False),
+        lambda: _attempt_inputlayer_patch(use_custom_objects=True),
+    ]
+
+    for loader in loaders:
+        try:
+            return loader()
+        except Exception as err:
+            attempts.append(str(err))
+
+    raise RuntimeError(" | ".join(attempts))
 
 app = Flask(__name__)
 # Enable CORS for the React frontend
 CORS(app)
 
-# Load the model
-# Using a try-except block just in case
-try:
-    model = load_model_with_compatibility('final_inception_model.h5')
-    model_load_error = None
-    print("Model loaded successfully!")
-except Exception as e:
-    print("Error loading model:", e)
-    model = None
-    model_load_error = str(e)
+model = None
+model_load_error = None
+model_load_attempted = False
+
+
+def ensure_model_loaded():
+    global model, model_load_error, model_load_attempted
+    if model is not None:
+        return True
+    if model_load_attempted and model is None:
+        return False
+
+    model_load_attempted = True
+    try:
+        model = load_model_with_compatibility('final_inception_model.h5')
+        model_load_error = None
+        print("Model loaded successfully!")
+        return True
+    except Exception as e:
+        print("Error loading model:", e)
+        model = None
+        model_load_error = str(e)
+        return False
 
 
 @app.route('/health', methods=['GET'])
 def health():
-    status_code = 200 if model is not None else 500
+    loaded = ensure_model_loaded()
+    status_code = 200 if loaded else 500
     return jsonify({
-        "status": "ok" if model is not None else "error",
-        "model_loaded": model is not None,
+        "status": "ok" if loaded else "error",
+        "model_loaded": loaded,
         "model_load_error": model_load_error
     }), status_code
 
@@ -71,7 +117,7 @@ def preprocess_image(image, target_size=(299, 299)):
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    if model is None:
+    if not ensure_model_loaded():
         return jsonify({"error": "Model not loaded properly."}), 500
 
     if 'image' not in request.files:
