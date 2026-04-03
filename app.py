@@ -1,6 +1,7 @@
 import os
 import io
 import json
+import threading
 import numpy as np
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -118,7 +119,20 @@ def _attempt_h5_config_rewrite(model_path: str, custom_objects: dict):
 
 app = Flask(__name__)
 # Enable CORS for the React frontend
-CORS(app)
+CORS(
+    app,
+    resources={r"/*": {"origins": "*"}},
+    methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
+
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers.setdefault("Access-Control-Allow-Origin", "*")
+    response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type,Authorization")
+    response.headers.setdefault("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+    return response
 
 model = None
 model_load_error = None
@@ -143,6 +157,14 @@ def ensure_model_loaded():
         model = None
         model_load_error = str(e)
         return False
+
+
+def warm_model_in_background():
+    # Warm model asynchronously so first /predict request is less likely to time out.
+    ensure_model_loaded()
+
+
+threading.Thread(target=warm_model_in_background, daemon=True).start()
 
 
 @app.route('/', methods=['GET'])
@@ -182,10 +204,13 @@ def preprocess_image(image, target_size=(299, 299)):
     
     return img_array
 
-@app.route('/predict', methods=['POST'])
+@app.route('/predict', methods=['POST', 'OPTIONS'])
 def predict():
+    if request.method == 'OPTIONS':
+        return jsonify({"status": "ok"}), 200
+
     if not ensure_model_loaded():
-        return jsonify({"error": "Model not loaded properly."}), 500
+        return jsonify({"error": "Model not loaded properly.", "details": model_load_error}), 500
 
     if 'image' not in request.files:
         return jsonify({"error": "No image provided."}), 400
