@@ -17,7 +17,7 @@ MODEL_CANDIDATES = [
     "final_inception_model.h5",
     "model.h5",
 ]
-MODEL_RETRY_SECONDS = 60  # Increased timeout for large model loading on Render
+MODEL_RETRY_SECONDS = 120  # Increased timeout for large model loading on Render (up to 2 minutes)
 DEFAULT_ALLOWED_ORIGINS = {
     "https://versionai.netlify.app",
     "https://visionai-artifactid.netlify.app",
@@ -324,18 +324,37 @@ def ensure_model_loaded():
 
         try:
             print(f"Loading model from: {resolved_source['type']}")
+            print(f"Config: {resolved_source.get('config_path', 'N/A')}")
+            print(f"Weights: {resolved_source.get('weights_path', 'N/A')}")
             start_time = time.time()
+            
             if resolved_source["type"] == "file":
+                print("Loading single file model...")
                 model = load_model_with_compatibility(resolved_source["path"])
                 model_source = resolved_source["path"]
             else:
-                model = load_unpacked_keras_v3_model(
-                    resolved_source["config_path"],
-                    resolved_source["weights_path"],
-                )
+                print("Loading unpacked Keras v3 model (this may take 1-2 minutes)...")
+                # Load config first to verify it's valid
+                config_path = resolved_source["config_path"]
+                weights_path = resolved_source["weights_path"]
+                
+                print(f"Step 1/3: Reading config.json ({os.path.getsize(config_path)} bytes)...")
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config_data = f.read()
+                print(f"Config loaded, parsing JSON...")
+                
+                print(f"Step 2/3: Building model from config...")
+                rebuilt_model = get_tf().keras.models.model_from_json(config_data)
+                print(f"Model built, loading weights...")
+                
+                print(f"Step 3/3: Loading weights ({os.path.getsize(weights_path)} bytes)...")
+                rebuilt_model.load_weights(weights_path)
+                model = rebuilt_model
+                
                 model_source = (
                     f"{resolved_source['config_path']} + {resolved_source['weights_path']}"
                 )
+            
             load_time = time.time() - start_time
             model_load_error = None
             print(f"SUCCESS! Model loaded in {load_time:.2f}s")
@@ -369,7 +388,44 @@ def root():
 @app.route('/health', methods=['GET'])
 def health():
     # Keep this endpoint lightweight for Render health probes.
+    # Don't block on model loading - just check if app is running
     return jsonify({"status": "ok", "service": "up"}), 200
+
+
+@app.route('/loading-status', methods=['GET'])
+def loading_status():
+    """Show model loading progress without blocking."""
+    global model, model_load_error, model_load_attempted, model_source
+    
+    if model is not None:
+        return jsonify({
+            "status": "ready",
+            "model_loaded": True,
+            "model_source": model_source
+        })
+    
+    if not model_load_attempted:
+        return jsonify({
+            "status": "loading",
+            "message": "Model is being loaded in background",
+            "model_loaded": False
+        })
+    
+    if model_load_error:
+        return jsonify({
+            "status": "error",
+            "model_loaded": False,
+            "error": model_load_error
+        }), 500
+    
+    # Model load attempted but not complete yet
+    time_waiting = time.time() - model_load_last_attempt_ts
+    return jsonify({
+        "status": "waiting_retry",
+        "model_loaded": False,
+        "time_since_attempt": f"{time_waiting:.1f}s",
+        "retry_in": f"{max(0, MODEL_RETRY_SECONDS - time_waiting):.1f}s"
+    })
 
 
 @app.route('/model-health', methods=['GET'])
