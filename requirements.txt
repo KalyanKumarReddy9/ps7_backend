@@ -1,6 +1,7 @@
 Flask==3.0.3
 Flask-Cors==4.0.0
-tensorflow-cpu==2.12.0
+# CUDA drivers are not installed through pip; use the CPU build for Render.
+tensorflow-cpu==2.15.1
 Pillow==10.3.0
 numpy==1.26.4
 gunicorn==20.1.0
