@@ -154,6 +154,16 @@ def load_unpacked_keras_v3_model(config_path: str, weights_path: str):
 
 def resolve_model_source():
     """Resolve the best available model source for this deployment."""
+    
+    # DIRECT FIX: Check if files are in current directory (most common on Render)
+    if os.path.exists("config.json") and os.path.exists("model.weights.h5"):
+        print("✅ Found model files in current directory")
+        return {
+            "type": "unpacked-keras-v3",
+            "config_path": "config.json",
+            "weights_path": "model.weights.h5",
+        }
+    
     env_model_path = os.environ.get("MODEL_PATH", "").strip()
     if env_model_path:
         absolute_env_model_path = env_model_path
@@ -372,6 +382,39 @@ def model_health():
         "model_source": model_source,
         "model_load_error": model_load_error
     }), status_code
+
+
+@app.route('/debug-paths', methods=['GET'])
+def debug_paths():
+    import os
+    
+    debug_info = {
+        "working_directory": os.getcwd(),
+        "script_directory": APP_DIR,
+        "environment": {
+            "MODEL_PATH": os.environ.get("MODEL_PATH", "Not set"),
+            "PYTHONPATH": os.environ.get("PYTHONPATH", "Not set"),
+        }
+    }
+    
+    # List files in key directories
+    dirs_to_check = [os.getcwd(), APP_DIR]
+    for directory in dirs_to_check:
+        if os.path.exists(directory):
+            try:
+                files = os.listdir(directory)
+                debug_info[f"files_in_{directory}"] = files[:20]  # First 20 files
+                
+                # Specifically look for model files
+                model_files = [f for f in files if any(ext in f for ext in ['.h5', '.keras', 'config.json', 'weights'])]
+                if model_files:
+                    debug_info[f"model_files_in_{directory}"] = model_files
+            except Exception as e:
+                debug_info[f"error_reading_{directory}"] = str(e)
+        else:
+            debug_info[f"directory_not_found_{directory}"] = True
+    
+    return jsonify(debug_info)
 
 
 # Catch-all route for undefined paths (helps with SPA routing)
