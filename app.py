@@ -17,7 +17,7 @@ MODEL_CANDIDATES = [
     "final_inception_model.h5",
     "model.h5",
 ]
-MODEL_RETRY_SECONDS = 20
+MODEL_RETRY_SECONDS = 60  # Increased timeout for large model loading on Render
 DEFAULT_ALLOWED_ORIGINS = {
     "https://versionai.netlify.app",
     "https://visionai-artifactid.netlify.app",
@@ -165,22 +165,34 @@ def resolve_model_source():
                 "path": absolute_env_model_path,
             }
 
-    for candidate in MODEL_CANDIDATES:
-        candidate_path = os.path.join(APP_DIR, candidate)
-        if os.path.exists(candidate_path):
-            return {
-                "type": "file",
-                "path": candidate_path,
-            }
-
+    # Check for unpacked Keras v3 format FIRST (preferred for Render)
     config_path = os.path.join(APP_DIR, "config.json")
     weights_path = os.path.join(APP_DIR, "model.weights.h5")
     if os.path.exists(config_path) and os.path.exists(weights_path):
+        print(f"Found model files: config.json ({os.path.getsize(config_path)} bytes), model.weights.h5 ({os.path.getsize(weights_path)} bytes)")
         return {
             "type": "unpacked-keras-v3",
             "config_path": config_path,
             "weights_path": weights_path,
         }
+
+    # Fallback to single file formats
+    for candidate in MODEL_CANDIDATES:
+        candidate_path = os.path.join(APP_DIR, candidate)
+        if os.path.exists(candidate_path):
+            print(f"Found model file: {candidate} ({os.path.getsize(candidate_path)} bytes)")
+            return {
+                "type": "file",
+                "path": candidate_path,
+            }
+
+    # Debug: List all files in directory
+    print(f"Model files not found in {APP_DIR}")
+    try:
+        files_in_dir = os.listdir(APP_DIR)
+        print(f"Files in app directory: {files_in_dir}")
+    except Exception as e:
+        print(f"Error listing directory: {e}")
 
     return None
 
@@ -264,10 +276,12 @@ model_source = None
 def ensure_model_loaded():
     global model, model_load_error, model_load_attempted, model_load_last_attempt_ts, model_source
     if model is not None:
+        print("Model already loaded")
         return True
 
     now = time.time()
     if model_load_attempted and (now - model_load_last_attempt_ts) < MODEL_RETRY_SECONDS:
+        print(f"Waiting for model load retry... ({MODEL_RETRY_SECONDS - (now - model_load_last_attempt_ts):.1f}s remaining)")
         return False
 
     with model_load_lock:
@@ -280,6 +294,11 @@ def ensure_model_loaded():
 
         model_load_attempted = True
         model_load_last_attempt_ts = now
+        
+        print("=" * 60)
+        print("Starting model load process...")
+        print(f"App directory: {APP_DIR}")
+        print(f"Files in directory: {os.listdir(APP_DIR) if os.path.exists(APP_DIR) else 'Directory not found'}")
 
         resolved_source = resolve_model_source()
         if resolved_source is None:
@@ -289,10 +308,13 @@ def ensure_model_loaded():
                 "Model file not found. Expected one of: "
                 f"{', '.join(MODEL_CANDIDATES)} or unpacked config.json + model.weights.h5"
             )
-            print("Error loading model:", model_load_error)
+            print("ERROR:", model_load_error)
+            print("=" * 60)
             return False
 
         try:
+            print(f"Loading model from: {resolved_source['type']}")
+            start_time = time.time()
             if resolved_source["type"] == "file":
                 model = load_model_with_compatibility(resolved_source["path"])
                 model_source = resolved_source["path"]
@@ -304,11 +326,17 @@ def ensure_model_loaded():
                 model_source = (
                     f"{resolved_source['config_path']} + {resolved_source['weights_path']}"
                 )
+            load_time = time.time() - start_time
             model_load_error = None
-            print("Model loaded successfully!")
+            print(f"SUCCESS! Model loaded in {load_time:.2f}s")
+            print(f"Model source: {model_source}")
+            print("=" * 60)
             return True
         except Exception as e:
-            print("Error loading model:", e)
+            import traceback
+            print(f"ERROR loading model: {e}")
+            print(traceback.format_exc())
+            print("=" * 60)
             model = None
             model_source = None
             model_load_error = str(e)
