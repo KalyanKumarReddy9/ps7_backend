@@ -4,49 +4,59 @@ import json
 import numpy as np
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import tensorflow as tf
 import h5py
 from PIL import Image
+
+tf = None
+
+
+def get_tf():
+    global tf
+    if tf is None:
+        import tensorflow as tensorflow_module
+        tf = tensorflow_module
+    return tf
 
 
 def load_model_with_compatibility(model_path: str):
     """Load model with compatibility fallbacks for common Keras serialization mismatches."""
+    tf_local = get_tf()
     custom_objects = {
         # Newer saved configs may include this class name while older runtimes expect Policy.
-        "DTypePolicy": tf.keras.mixed_precision.Policy,
+        "DTypePolicy": tf_local.keras.mixed_precision.Policy,
     }
 
     attempts = []
 
     def _attempt_default():
-        return tf.keras.models.load_model(model_path, compile=False)
+        return tf_local.keras.models.load_model(model_path, compile=False)
 
     def _attempt_custom_objects():
-        return tf.keras.models.load_model(
+        return tf_local.keras.models.load_model(
             model_path,
             compile=False,
             custom_objects=custom_objects,
         )
 
     def _attempt_inputlayer_patch(use_custom_objects: bool):
-        original_init = tf.keras.layers.InputLayer.__init__
+        original_init = tf_local.keras.layers.InputLayer.__init__
 
         def patched_init(self, *args, **kwargs):
             if "batch_shape" in kwargs and "batch_input_shape" not in kwargs:
                 kwargs["batch_input_shape"] = kwargs.pop("batch_shape")
             return original_init(self, *args, **kwargs)
 
-        tf.keras.layers.InputLayer.__init__ = patched_init
+        tf_local.keras.layers.InputLayer.__init__ = patched_init
         try:
             if use_custom_objects:
-                return tf.keras.models.load_model(
+                return tf_local.keras.models.load_model(
                     model_path,
                     compile=False,
                     custom_objects=custom_objects,
                 )
-            return tf.keras.models.load_model(model_path, compile=False)
+            return tf_local.keras.models.load_model(model_path, compile=False)
         finally:
-            tf.keras.layers.InputLayer.__init__ = original_init
+            tf_local.keras.layers.InputLayer.__init__ = original_init
 
     loaders = [
         _attempt_default,
@@ -86,6 +96,7 @@ def _patch_model_config(obj):
 
 
 def _attempt_h5_config_rewrite(model_path: str, custom_objects: dict):
+    tf_local = get_tf()
     with h5py.File(model_path, "r") as h5_file:
         raw_model_config = h5_file.attrs.get("model_config")
 
@@ -98,7 +109,7 @@ def _attempt_h5_config_rewrite(model_path: str, custom_objects: dict):
     parsed_config = json.loads(raw_model_config)
     patched_config = _patch_model_config(parsed_config)
 
-    rebuilt_model = tf.keras.models.model_from_json(
+    rebuilt_model = tf_local.keras.models.model_from_json(
         json.dumps(patched_config),
         custom_objects=custom_objects,
     )
@@ -145,6 +156,7 @@ def health():
     }), status_code
 
 def preprocess_image(image, target_size=(299, 299)):
+    tf_local = get_tf()
     if image.mode != "RGB":
         image = image.convert("RGB")
     image = image.resize(target_size)
@@ -152,10 +164,10 @@ def preprocess_image(image, target_size=(299, 299)):
     
     # Expand dimensions to create a batch size of 1
     img_array = np.expand_dims(img_array, axis=0)
-    
+
     # InceptionV3 preprocessing
     # Or simply: img_array = img_array / 255.0 depending on how the model was trained.
-    img_array = tf.keras.applications.inception_v3.preprocess_input(img_array)
+    img_array = tf_local.keras.applications.inception_v3.preprocess_input(img_array)
     
     return img_array
 
