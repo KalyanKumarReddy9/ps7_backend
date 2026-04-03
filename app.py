@@ -1,9 +1,11 @@
 import os
 import io
+import json
 import numpy as np
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import tensorflow as tf
+import h5py
 from PIL import Image
 
 
@@ -51,6 +53,7 @@ def load_model_with_compatibility(model_path: str):
         _attempt_custom_objects,
         lambda: _attempt_inputlayer_patch(use_custom_objects=False),
         lambda: _attempt_inputlayer_patch(use_custom_objects=True),
+        lambda: _attempt_h5_config_rewrite(model_path, custom_objects),
     ]
 
     for loader in loaders:
@@ -60,6 +63,47 @@ def load_model_with_compatibility(model_path: str):
             attempts.append(str(err))
 
     raise RuntimeError(" | ".join(attempts))
+
+
+def _patch_model_config(obj):
+    if isinstance(obj, dict):
+        if obj.get("class_name") == "DTypePolicy":
+            obj["class_name"] = "Policy"
+            obj["module"] = "keras.mixed_precision"
+
+        config = obj.get("config")
+        if isinstance(config, dict) and "batch_shape" in config and "batch_input_shape" not in config:
+            config["batch_input_shape"] = config.pop("batch_shape")
+
+        for key, value in list(obj.items()):
+            obj[key] = _patch_model_config(value)
+        return obj
+
+    if isinstance(obj, list):
+        return [_patch_model_config(item) for item in obj]
+
+    return obj
+
+
+def _attempt_h5_config_rewrite(model_path: str, custom_objects: dict):
+    with h5py.File(model_path, "r") as h5_file:
+        raw_model_config = h5_file.attrs.get("model_config")
+
+    if raw_model_config is None:
+        raise RuntimeError("H5 file does not contain model_config")
+
+    if isinstance(raw_model_config, bytes):
+        raw_model_config = raw_model_config.decode("utf-8")
+
+    parsed_config = json.loads(raw_model_config)
+    patched_config = _patch_model_config(parsed_config)
+
+    rebuilt_model = tf.keras.models.model_from_json(
+        json.dumps(patched_config),
+        custom_objects=custom_objects,
+    )
+    rebuilt_model.load_weights(model_path)
+    return rebuilt_model
 
 app = Flask(__name__)
 # Enable CORS for the React frontend
