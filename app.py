@@ -18,6 +18,11 @@ MODEL_CANDIDATES = [
     "model.h5",
 ]
 MODEL_RETRY_SECONDS = 20
+DEFAULT_ALLOWED_ORIGINS = {
+    "https://versionai.netlify.app",
+    "https://visionai-artifactid.netlify.app",
+    "https://ps7-backend-fhze.onrender.com",
+}
 
 
 def get_tf():
@@ -222,7 +227,7 @@ def _attempt_h5_config_rewrite(model_path: str, custom_objects: dict):
     return rebuilt_model
 
 app = Flask(__name__)
-# Enable CORS for the React frontend
+# Enable CORS for frontend deployments.
 CORS(
     app,
     resources={r"/*": {"origins": "*"}},
@@ -231,9 +236,24 @@ CORS(
 )
 
 
+def _get_allowed_origins():
+    configured = os.environ.get("CORS_ORIGINS", "").strip()
+    if not configured:
+        return set(DEFAULT_ALLOWED_ORIGINS)
+    return {origin.strip() for origin in configured.split(",") if origin.strip()}
+
+
 @app.after_request
 def add_cors_headers(response):
-    response.headers.setdefault("Access-Control-Allow-Origin", "*")
+    origin = request.headers.get("Origin")
+    allowed_origins = _get_allowed_origins()
+
+    if origin and ("*" in allowed_origins or origin in allowed_origins):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+    else:
+        response.headers.setdefault("Access-Control-Allow-Origin", "*")
+
     response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type,Authorization")
     response.headers.setdefault("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
     return response
@@ -397,7 +417,7 @@ def predict():
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e), "details": model_load_error}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
