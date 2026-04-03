@@ -345,6 +345,16 @@ def model_health():
         "model_load_error": model_load_error
     }), status_code
 
+
+# Catch-all route for undefined paths (helps with SPA routing)
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({
+        "error": "Not Found",
+        "message": "The requested endpoint does not exist",
+        "available_endpoints": ["/", "/health", "/model-health", "/predict"]
+    }), 404
+
 def preprocess_image(image, target_size=(299, 299)):
     tf_local = get_tf()
     if image.mode != "RGB":
