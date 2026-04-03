@@ -145,8 +145,19 @@ def ensure_model_loaded():
         return False
 
 
+@app.route('/', methods=['GET'])
+def root():
+    return jsonify({"status": "ok", "service": "ps7-backend"}), 200
+
+
 @app.route('/health', methods=['GET'])
 def health():
+    # Keep this endpoint lightweight for Render health probes.
+    return jsonify({"status": "ok", "service": "up"}), 200
+
+
+@app.route('/model-health', methods=['GET'])
+def model_health():
     loaded = ensure_model_loaded()
     status_code = 200 if loaded else 500
     return jsonify({
