@@ -227,13 +227,8 @@ def _attempt_h5_config_rewrite(model_path: str, custom_objects: dict):
     return rebuilt_model
 
 app = Flask(__name__)
-# Enable CORS for frontend deployments.
-CORS(
-    app,
-    resources={r"/*": {"origins": "*"}},
-    methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
-)
+# Enable CORS for frontend deployments - simplified configuration
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 
 def _get_allowed_origins():
