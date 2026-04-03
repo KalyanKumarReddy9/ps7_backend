@@ -28,12 +28,21 @@ def get_tf():
     return tf
 
 
+def get_dtype_policy_class(tf_local):
+    return getattr(
+        tf_local.keras.mixed_precision,
+        "DTypePolicy",
+        tf_local.keras.mixed_precision.Policy,
+    )
+
+
 def load_model_with_compatibility(model_path: str):
     """Load model with compatibility fallbacks for common Keras serialization mismatches."""
     tf_local = get_tf()
+    dtype_policy_class = get_dtype_policy_class(tf_local)
     custom_objects = {
-        # Newer saved configs may include this class name while older runtimes expect Policy.
-        "DTypePolicy": tf_local.keras.mixed_precision.Policy,
+        # Newer saved configs may include this class name.
+        "DTypePolicy": dtype_policy_class,
     }
 
     attempts = []
@@ -88,22 +97,54 @@ def load_model_with_compatibility(model_path: str):
 def load_unpacked_keras_v3_model(config_path: str, weights_path: str):
     """Load a model from unpacked .keras artifacts (config.json + model.weights.h5)."""
     tf_local = get_tf()
+    dtype_policy_class = get_dtype_policy_class(tf_local)
     custom_objects = {
-        "DTypePolicy": tf_local.keras.mixed_precision.Policy,
+        "DTypePolicy": dtype_policy_class,
     }
 
     with open(config_path, "r", encoding="utf-8") as config_file:
         raw_config = config_file.read()
 
     parsed_config = json.loads(raw_config)
-    patched_config = _patch_model_config(parsed_config)
 
-    rebuilt_model = tf_local.keras.models.model_from_json(
-        json.dumps(patched_config),
-        custom_objects=custom_objects,
+    attempts = []
+
+    # First try native deserialization for unpacked Keras-v3 configs.
+    try:
+        rebuilt_model = tf_local.keras.models.model_from_json(raw_config)
+        rebuilt_model.load_weights(weights_path)
+        return rebuilt_model
+    except Exception as err:
+        attempts.append(str(err))
+
+    # Retry with explicit custom object for DTypePolicy.
+    try:
+        rebuilt_model = tf_local.keras.models.model_from_json(
+            raw_config,
+            custom_objects=custom_objects,
+        )
+        rebuilt_model.load_weights(weights_path)
+        return rebuilt_model
+    except Exception as err:
+        attempts.append(str(err))
+
+    # Last attempt: patch legacy fields only if needed.
+    has_dtype_policy_class = hasattr(tf_local.keras.mixed_precision, "DTypePolicy")
+    patched_config = _patch_model_config(
+        parsed_config,
+        convert_dtype_policy_to_policy=not has_dtype_policy_class,
     )
-    rebuilt_model.load_weights(weights_path)
-    return rebuilt_model
+    try:
+        rebuilt_model = tf_local.keras.models.model_from_json(
+            json.dumps(patched_config),
+            custom_objects=custom_objects,
+        )
+        rebuilt_model.load_weights(weights_path)
+        return rebuilt_model
+    except Exception as err:
+        attempts.append(str(err))
+
+    raise RuntimeError(" | ".join(attempts))
 
 
 def resolve_model_source():
@@ -139,9 +180,9 @@ def resolve_model_source():
     return None
 
 
-def _patch_model_config(obj):
+def _patch_model_config(obj, convert_dtype_policy_to_policy=True):
     if isinstance(obj, dict):
-        if obj.get("class_name") == "DTypePolicy":
+        if convert_dtype_policy_to_policy and obj.get("class_name") == "DTypePolicy":
             obj["class_name"] = "Policy"
             obj["module"] = "keras.mixed_precision"
 
@@ -150,11 +191,11 @@ def _patch_model_config(obj):
             config["batch_input_shape"] = config.pop("batch_shape")
 
         for key, value in list(obj.items()):
-            obj[key] = _patch_model_config(value)
+            obj[key] = _patch_model_config(value, convert_dtype_policy_to_policy)
         return obj
 
     if isinstance(obj, list):
-        return [_patch_model_config(item) for item in obj]
+        return [_patch_model_config(item, convert_dtype_policy_to_policy) for item in obj]
 
     return obj
 
