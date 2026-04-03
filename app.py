@@ -6,6 +6,29 @@ from flask_cors import CORS
 import tensorflow as tf
 from PIL import Image
 
+
+def load_model_with_compatibility(model_path: str):
+    """Load a Keras model and patch legacy/newer InputLayer config key mismatch."""
+    try:
+        return tf.keras.models.load_model(model_path)
+    except Exception as first_error:
+        # Some model files use `batch_shape` while this runtime expects `batch_input_shape`.
+        if "Unrecognized keyword arguments: ['batch_shape']" not in str(first_error):
+            raise
+
+        original_init = tf.keras.layers.InputLayer.__init__
+
+        def patched_init(self, *args, **kwargs):
+            if "batch_shape" in kwargs and "batch_input_shape" not in kwargs:
+                kwargs["batch_input_shape"] = kwargs.pop("batch_shape")
+            return original_init(self, *args, **kwargs)
+
+        tf.keras.layers.InputLayer.__init__ = patched_init
+        try:
+            return tf.keras.models.load_model(model_path)
+        finally:
+            tf.keras.layers.InputLayer.__init__ = original_init
+
 app = Flask(__name__)
 # Enable CORS for the React frontend
 CORS(app)
@@ -13,7 +36,7 @@ CORS(app)
 # Load the model
 # Using a try-except block just in case
 try:
-    model = tf.keras.models.load_model('final_inception_model.h5')
+    model = load_model_with_compatibility('final_inception_model.h5')
     print("Model loaded successfully!")
 except Exception as e:
     print("Error loading model:", e)
