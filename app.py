@@ -3,6 +3,7 @@ import os
 import io
 import json
 import threading
+import time
 import numpy as np
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -10,6 +11,9 @@ import h5py
 from PIL import Image
 
 tf = None
+MODEL_FILENAME = "final_inception_model.h5"
+MODEL_PATH = os.path.join(os.path.dirname(__file__), MODEL_FILENAME)
+MODEL_RETRY_SECONDS = 20
 
 
 def get_tf():
@@ -138,26 +142,46 @@ def add_cors_headers(response):
 model = None
 model_load_error = None
 model_load_attempted = False
+model_load_last_attempt_ts = 0.0
+model_load_lock = threading.Lock()
 
 
 def ensure_model_loaded():
-    global model, model_load_error, model_load_attempted
+    global model, model_load_error, model_load_attempted, model_load_last_attempt_ts
     if model is not None:
         return True
-    if model_load_attempted and model is None:
+
+    now = time.time()
+    if model_load_attempted and (now - model_load_last_attempt_ts) < MODEL_RETRY_SECONDS:
         return False
 
-    model_load_attempted = True
-    try:
-        model = load_model_with_compatibility('final_inception_model.h5')
-        model_load_error = None
-        print("Model loaded successfully!")
-        return True
-    except Exception as e:
-        print("Error loading model:", e)
-        model = None
-        model_load_error = str(e)
-        return False
+    with model_load_lock:
+        if model is not None:
+            return True
+
+        now = time.time()
+        if model_load_attempted and (now - model_load_last_attempt_ts) < MODEL_RETRY_SECONDS:
+            return False
+
+        model_load_attempted = True
+        model_load_last_attempt_ts = now
+
+        if not os.path.exists(MODEL_PATH):
+            model = None
+            model_load_error = f"Model file not found at {MODEL_PATH}"
+            print("Error loading model:", model_load_error)
+            return False
+
+        try:
+            model = load_model_with_compatibility(MODEL_PATH)
+            model_load_error = None
+            print("Model loaded successfully!")
+            return True
+        except Exception as e:
+            print("Error loading model:", e)
+            model = None
+            model_load_error = str(e)
+            return False
 
 
 def warm_model_in_background():
