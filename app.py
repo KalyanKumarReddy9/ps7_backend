@@ -12,6 +12,7 @@ import traceback
 from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import gradio as gr
 from PIL import Image
 import numpy as np
 
@@ -21,6 +22,7 @@ import numpy as np
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_FILENAME = "final_inception_model.h5"
+DEFAULT_PORT = 7860
 
 # Global variables
 model = None
@@ -218,21 +220,51 @@ def preprocess_image(image, target_size=(299, 299)):
     
     return img_array
 
+def predict_image(image):
+    """Shared prediction helper for Flask and Gradio."""
+    if model is None:
+        return {
+            "success": False,
+            "error": "Model not loaded",
+            "status": model_load_status,
+            "message": model_load_error if model_load_error else "Model is not ready"
+        }
+
+    if image is None:
+        return {"success": False, "error": "No image provided"}
+
+    try:
+        processed = preprocess_image(image)
+        prediction = model.predict(processed, verbose=0)
+
+        if len(prediction.shape) == 2 and prediction.shape[1] == 1:
+            score = float(prediction[0][0])
+            confidence = max(score, 1 - score)
+            is_fake = score > 0.5
+
+            return {
+                "success": True,
+                "prediction": "AI Generated" if is_fake else "Real Image",
+                "confidence": round(confidence * 100, 2),
+                "raw_score": score
+            }
+
+        return {
+            "success": True,
+            "prediction": prediction.tolist()
+        }
+
+    except Exception as e:
+        print(f"Prediction error: {e}")
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
 @app.route('/predict', methods=['POST', 'OPTIONS'])
 def predict():
     """Make prediction"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
-    
-    # Check if model is loaded
-    if model is None:
-        return jsonify({
-            "success": False,
-            "error": "Model not loaded",
-            "status": model_load_status,
-            "message": model_load_error if model_load_error else "Model is not ready"
-        }), 503
-    
+
     # Check for image
     if 'image' not in request.files:
         return jsonify({"success": False, "error": "No image provided"}), 400
@@ -242,36 +274,58 @@ def predict():
         return jsonify({"success": False, "error": "Invalid file"}), 400
     
     try:
-        # Read and preprocess
         img_bytes = file.read()
         image = Image.open(io.BytesIO(img_bytes))
-        processed = preprocess_image(image)
-        
-        # Predict
-        prediction = model.predict(processed, verbose=0)
-        
-        # Format response
-        if len(prediction.shape) == 2 and prediction.shape[1] == 1:
-            score = float(prediction[0][0])
-            confidence = max(score, 1 - score)
-            is_fake = score > 0.5
-            
-            return jsonify({
-                "success": True,
-                "prediction": "AI Generated" if is_fake else "Real Image",
-                "confidence": round(confidence * 100, 2),
-                "raw_score": score
-            })
-        else:
-            return jsonify({
-                "success": True,
-                "prediction": prediction.tolist()
-            })
-    
+        result = predict_image(image)
+
+        if not result.get("success"):
+            return jsonify(result), 503 if result.get("error") == "Model not loaded" else 400
+
+        return jsonify(result)
+
     except Exception as e:
         print(f"Prediction error: {e}")
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
+
+def build_gradio_app():
+    """Create the Gradio interface for Hugging Face Spaces."""
+
+    def gradio_predict(image):
+        result = predict_image(image)
+        if not result.get("success"):
+            return result.get("error", "Prediction failed"), None, None, result
+
+        prediction = result.get("prediction")
+        confidence = result.get("confidence")
+        raw_score = result.get("raw_score")
+
+        if isinstance(prediction, list):
+            prediction = json.dumps(prediction, indent=2)
+
+        return prediction, confidence, raw_score, result
+
+    with gr.Blocks(title="AI Image Detection") as demo:
+        gr.Markdown(
+            "# AI Image Detection\n"
+            "Upload an image to check whether it is real or AI-generated."
+        )
+        with gr.Row():
+            image_input = gr.Image(type="pil", label="Upload Image")
+            with gr.Column():
+                predict_button = gr.Button("Analyze Image", variant="primary")
+                prediction_output = gr.Textbox(label="Prediction")
+                confidence_output = gr.Number(label="Confidence (%)")
+                raw_score_output = gr.Number(label="Raw Score")
+                debug_output = gr.JSON(label="Full Result")
+
+        predict_button.click(
+            gradio_predict,
+            inputs=[image_input],
+            outputs=[prediction_output, confidence_output, raw_score_output, debug_output]
+        )
+
+    return demo
 
 @app.errorhandler(404)
 def not_found(error):
@@ -286,12 +340,18 @@ def internal_error(error):
 # ============================================================================
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    
+    port = int(os.environ.get("PORT", DEFAULT_PORT))
+    use_flask = os.environ.get("USE_FLASK", "0") == "1"
+
     print("=" * 60)
-    print(f"Starting Flask server on port {port}")
+    print(f"Starting application on port {port}")
     print(f"Model status: {model_load_status}")
     print(f"Model loaded: {model is not None}")
+    print(f"Mode: {'Flask' if use_flask else 'Gradio'}")
     print("=" * 60)
-    
-    app.run(host='0.0.0.0', port=port, threaded=True)
+
+    if use_flask:
+        app.run(host='0.0.0.0', port=port, threaded=True)
+    else:
+        demo = build_gradio_app()
+        demo.launch(server_name='0.0.0.0', server_port=port, show_error=True)
